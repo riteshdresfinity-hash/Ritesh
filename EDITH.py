@@ -4,6 +4,7 @@ import json
 import re
 from groq import Groq
 from datetime import datetime
+import time
 
 st.set_page_config(
     page_title="EDITH",
@@ -28,6 +29,13 @@ html, body, [class*="css"] {
 .stApp {
     background: #0a0a0f;
     color: #e8e8f0;
+}
+
+/* Fix the main app layout */
+.stApp > section {
+    max-height: 100vh;
+    display: flex;
+    flex-direction: column;
 }
 
 /* Landing page */
@@ -136,6 +144,8 @@ html, body, [class*="css"] {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
+    height: 100vh;
 }
 
 .chat-header {
@@ -145,15 +155,20 @@ html, body, [class*="css"] {
     align-items: center;
     gap: 12px;
     background: #0a0a0f;
+    flex-shrink: 0;
+    z-index: 10;
 }
 
 .messages-area {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 32px;
     max-width: 800px;
     margin: 0 auto;
     width: 100%;
+    box-sizing: border-box;
+    scroll-behavior: smooth;
 }
 
 .message-user {
@@ -167,6 +182,7 @@ html, body, [class*="css"] {
     color: #e0e0f0;
     font-size: 14px;
     line-height: 1.6;
+    animation: fadeInUp 0.6s ease-out;
 }
 
 .message-ai {
@@ -179,6 +195,7 @@ html, body, [class*="css"] {
     color: #d0d0e8;
     font-size: 14px;
     line-height: 1.7;
+    animation: fadeInUp 0.6s ease-out;
 }
 
 .message-ai-header {
@@ -352,15 +369,71 @@ html, body, [class*="css"] {
     margin-top: 2px;
 }
 
-/* Input bar */
-.input-bar {
-    padding: 20px 32px;
-    border-top: 1px solid #1e1e2e;
-    background: #0a0a0f;
+/* Input bar styling */
+/* Target the columns/buttons that appear after messages */
+.stApp > section [data-testid="stHorizontalBlock"] {
     max-width: 800px;
-    margin: 0 auto;
+    margin: 32px auto 0 auto;
+    width: 100%;
+    display: flex !important;
+    gap: 12px !important;
+}
+
+/* Text input - Make it responsive */
+.stTextInput {
+    flex: 1;
     width: 100%;
 }
+
+.stTextInput input {
+    background: #13131f !important;
+    border: 1.5px solid #2a2a3d !important;
+    border-radius: 12px !important;
+    color: #e0e0f0 !important;
+    font-family: 'Inter', sans-serif !important;
+    padding: 14px 18px !important;
+    font-size: 15px !important;
+    width: 100% !important;
+    transition: all 0.2s ease !important;
+}
+
+.stTextInput input:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.2) !important;
+    outline: none !important;
+    background: #13131f !important;
+}
+
+.stTextInput input::placeholder {
+    color: #6060a0 !important;
+    opacity: 1 !important;
+}
+
+/* Send / quick prompt button styling */
+.stButton > button {
+    background: transparent !important;
+    color: #e8e8f0 !important;
+    border: 1px solid rgba(99, 102, 241, 0.17) !important;
+    border-radius: 12px !important;
+    padding: 14px 24px !important;
+    font-weight: 600 !important;
+    font-size: 15px !important;
+    font-family: 'Inter', sans-serif !important;
+    transition: all 0.2s !important;
+    min-height: 48px !important;
+    cursor: pointer !important;
+    backdrop-filter: none !important;
+}
+
+.stButton > button:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+    opacity: 1 !important;
+}
+
+.stButton > button:active {
+    opacity: 0.85 !important;
+}
+
 
 /* Stagger animation placeholders */
 .typing-dot {
@@ -376,6 +449,18 @@ html, body, [class*="css"] {
 @keyframes typing {
     0%, 60%, 100% { opacity: 0.2; transform: translateY(0); }
     30% { opacity: 1; transform: translateY(-4px); }
+}
+
+/* Fade in animation */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 /* Streamlit widget overrides */
@@ -402,6 +487,21 @@ html, body, [class*="css"] {
     color: #e0e0f0 !important;
     font-family: 'Inter', sans-serif !important;
     padding: 12px 16px !important;
+    font-size: 15px !important;
+    width: 100% !important;
+    transition: all 0.2s ease !important;
+}
+
+.stTextInput input:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.15) !important;
+    outline: none !important;
+    background: #13131f !important;
+}
+
+.stTextInput input::placeholder {
+    color: #6060a0 !important;
+    opacity: 1 !important;
 }
 
 .stButton > button {
@@ -414,11 +514,16 @@ html, body, [class*="css"] {
     font-size: 15px !important;
     font-family: 'Inter', sans-serif !important;
     transition: opacity 0.2s !important;
+    min-height: 44px !important;
     width: 100% !important;
 }
 
 .stButton > button:hover {
     opacity: 0.85 !important;
+}
+
+.stButton > button:active {
+    opacity: 0.75 !important;
 }
 
 .stButton > button[kind="secondary"] {
@@ -452,6 +557,47 @@ h1, h2, h3 { color: #ffffff !important; }
     border-top-color: #6366f1 !important;
 }
 
+/* FLOATING INPUT BOX POSITIONING */
+.stApp > section [data-testid="stHorizontalBlock"]:last-of-type {
+    position: fixed !important; 
+    bottom: 32px !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: 800px !important;
+    max-width: calc(100% - 360px) !important;
+    z-index: 1001 !important;
+    display: flex !important;
+    gap: 12px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+}
+
+/* Quick prompts - position above input */
+.stApp > section [data-testid="stHorizontalBlock"]:nth-last-of-type(2) {
+    position: fixed !important;
+    bottom: 100px !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: 800px !important;
+    max-width: calc(100% - 360px) !important;
+    z-index: 1000 !important;
+    gap: 8px !important;
+    border: none !important;
+}
+
+/* Hide spacer element */
+[data-testid="stVerticalBlock"] > [data-testid="stMarkdownContainer"]:nth-last-of-type(1) {
+    display: none !important;
+}
+
+/* Remove any red borders */
+[data-testid="stHorizontalBlock"],
+[data-testid="stVerticalBlock"],
+.stApp > section {
+    border: none !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -469,6 +615,8 @@ def call_cofounder(messages: list, privacy: bool = False) -> str:
     system = """You are an expert AI cofounder, startup mentor, and market research analyst.
 Your role is to help founders research and build products people actually want.
 
+I'm so excited to help you turn your idea into something amazing! Let's dive deep and build something people will love.
+
 When a user shares a startup idea, you:
 1. Ask smart clarifying questions OR immediately generate a comprehensive market research report
 2. Provide deep market research with realistic data
@@ -485,10 +633,13 @@ Format your market research reports with these sections using markdown:
 - **Validation Strategy** (how to test before building)
 - **Key Features** (must-haves for MVP)
 - **Revenue Model**
+- **Pricing Strategy** (formula and approach for setting prices)
+- **Business Location** (where to operate: states/districts, ecommerce platforms, or specific regions based on analysis)
+- **Fresh Starter Guide** (legal requirements, funding options, marketing basics, operational setup, first profit strategies, and everything a beginner needs to know)
 - **Go-To-Market**
 - **Risks & Red Flags**
 
-Be specific, realistic, and cite reasoning. Act like a brilliant cofounder who has done their homework."""
+Be specific, realistic, and cite reasoning. Act like a brilliant cofounder who has done their homework. Show enthusiasm and support throughout!"""
 
     if privacy:
         system += "\n\nPRIVACY MODE: The user has enabled privacy mode. Do not reference external companies or publicly known data points that could identify the user's idea. Keep analysis generic."
@@ -499,8 +650,13 @@ Be specific, realistic, and cite reasoning. Act like a brilliant cofounder who h
             messages=[{"role": "system", "content": system}] + messages,
             temperature=0.7,
             max_tokens=3000,
+            stream=True
         )
-        return resp.choices[0].message.content
+        full_response = ""
+        for chunk in resp:
+            if chunk.choices[0].delta.content:
+                full_response += chunk.choices[0].delta.content
+        return full_response
     except Exception as e:
         return f"❌ Error: {e}"
 
@@ -533,7 +689,6 @@ def render_report(content: str, idea_title: str):
             </div>
             <div class="report-badge">✓ Published</div>
         </div>
-        {f'<div class="key-insight"><div class="key-insight-label">Key Insight</div><div class="key-insight-text">{key_insight}</div></div>' if key_insight else ''}
         <div class="sources-count">📊 Powered by llama-3.3-70b · Deep AI research</div>
     </div>
     """, unsafe_allow_html=True)
@@ -691,47 +846,82 @@ def render_chat():
     </div>
     """, unsafe_allow_html=True)
 
+    # Render messages with extra bottom padding for the floating input
     idea_title = st.session_state.current_idea or "Your idea"
     for msg in st.session_state.messages:
         render_message(msg["role"], msg["content"], idea_title)
+    
+    # Add massive bottom padding to prevent messages from hiding under floating input
+    st.markdown("<div style='height: 280px;'></div>", unsafe_allow_html=True)
 
-    st.markdown("---")
+    # Floating input box - completely separate from the flow
+    st.markdown("""
+    <div style="
+        position: fixed;
+        bottom: 0;
+        left: 280px;
+        right: 0;
+        width: calc(100% - 280px);
+        padding: 20px 32px 32px 32px;
+        background: transparent;
+        border-top: none;
+        z-index: 999;
+        box-sizing: border-box;
+        backdrop-filter: none;
+    " id="floating-input-container">
+    </div>
+    """, unsafe_allow_html=True)
 
-    col1, col2 = st.columns([6, 1])
+    # Callback to handle input submission
+    def submit_input():
+        if st.session_state.follow_up_input.strip():
+            st.session_state.messages.append({"role": "user", "content": st.session_state.follow_up_input.strip()})
+            with st.spinner("Thinking..."):
+                response = call_cofounder(st.session_state.messages, st.session_state.privacy)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            save_session()
+            st.session_state.follow_up_input = ""
+            st.rerun()
+    
+    # Input controls in columns
+    col1, col2 = st.columns([6, 1], gap="small")
     with col1:
         follow_up = st.text_input(
             "Follow-up message",
             placeholder="Ask a follow-up question, request deeper analysis, or pivot the idea...",
             key="follow_up_input",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            on_change=submit_input
         )
     with col2:
-        send = st.button("Send →", key="send_btn")
+        if st.button("Send →", key="send_btn", use_container_width=True):
+            if follow_up.strip():
+                st.session_state.messages.append({"role": "user", "content": follow_up.strip()})
+                with st.spinner("Thinking..."):
+                    response = call_cofounder(st.session_state.messages, st.session_state.privacy)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                save_session()
+                st.rerun()
 
-    if send and follow_up.strip():
-        st.session_state.messages.append({"role": "user", "content": follow_up.strip()})
-        with st.spinner("Thinking..."):
-            response = call_cofounder(st.session_state.messages, st.session_state.privacy)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        save_session()
-        st.rerun()
-
-    quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
+    # Quick prompts
+    st.write("")
+    quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4, gap="small")
     quick_prompts = [
         ("🎯 Validate idea", "Can you help me validate this idea with real market signals and evidence? What should I test first?"),
         ("🏆 Competitors", "Do a deep competitive analysis. Who are the main competitors, what are their weaknesses, and where is the gap?"),
         ("💰 Revenue model", "What's the best revenue model for this? Give me 3 options with pros, cons, and realistic numbers."),
-        ("🗺️ Go-to-market", "Give me a step-by-step go-to-market strategy for the first 90 days with specific actions."),
+        ("💸 Pricing Strategy", "Give me a detailed pricing strategy and formula for this product/service. How should I set prices to maximize profit?"),
     ]
     for col, (label, prompt) in zip([quick_col1, quick_col2, quick_col3, quick_col4], quick_prompts):
         with col:
-            if st.button(label, key=f"quick_{label}"):
+            if st.button(label, key=f"quick_{label}", use_container_width=True):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.spinner("Thinking..."):
                     response = call_cofounder(st.session_state.messages, st.session_state.privacy)
                 st.session_state.messages.append({"role": "assistant", "content": response})
                 save_session()
                 st.rerun()
+
 
 
 def main():
