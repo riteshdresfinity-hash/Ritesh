@@ -68,6 +68,9 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_tx_owner ON transactions(owner_id);
         CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(date);
         """)
+        cols = [row[1] for row in db.execute("PRAGMA table_info(transactions)").fetchall()]
+        if 'payment_type' not in cols:
+            db.execute("ALTER TABLE transactions ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'cash'")
 
 def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def check_password(pw, h): return hash_password(pw) == h
@@ -365,12 +368,15 @@ def add_transaction():
     if request.method == 'POST':
         d    = request.form.get('date','').strip()
         shop = request.form.get('shop','').strip()
+        payment_type = request.form.get('payment_type','cash')
         # collect items: names[], prices[], qtys[]
         names  = request.form.getlist('item_name[]')
         prices = request.form.getlist('item_price[]')
         qtys   = request.form.getlist('item_qty[]')
         if not d or not shop:
             err = 'Date and shop name are required.'
+        elif payment_type not in ('cash','card'):
+            err = 'Select a valid payment method.'
         elif not names or all(n.strip()=='' for n in names):
             err = 'Add at least one item.'
         else:
@@ -386,8 +392,8 @@ def add_transaction():
                         err = f'Item "{name}" has invalid price or quantity.'; break
                     total = round(price * qty, 2)
                     db.execute(
-                        'INSERT INTO transactions(owner_id,date,shop,product,quantity,price,total) VALUES(?,?,?,?,?,?,?)',
-                        (session['user_id'], d, shop, name, qty, price, total))
+                        'INSERT INTO transactions(owner_id,date,shop,product,quantity,price,total,payment_type) VALUES(?,?,?,?,?,?,?,?)',
+                        (session['user_id'], d, shop, name, qty, price, total, payment_type))
                     saved += 1
                 if not err:
                     db.commit()
@@ -516,6 +522,13 @@ addRow();
             <span class="lp-ml">Shop name :-</span>
             <input type="text" name="shop" placeholder="e.g. Walmart" required>
           </div>
+          <div class="lp-mf">
+            <span class="lp-ml">Payment method :-</span>
+            <div style="display:flex;gap:12px;align-items:center">
+              <label style="display:inline-flex;align-items:center;gap:8px;font-size:.9rem;color:#4c4b57"><input type="radio" name="payment_type" value="cash" checked> Cash</label>
+              <label style="display:inline-flex;align-items:center;gap:8px;font-size:.9rem;color:#4c4b57"><input type="radio" name="payment_type" value="card"> Card</label>
+            </div>
+          </div>
         </div>
         <div class="items-wrap" id="itemsWrap"></div>
         <button type="button" class="add-row-btn" onclick="addRow()">
@@ -546,14 +559,17 @@ def edit_transaction(tid):
     if not tx: return redirect('/history')
     err = ''
     if request.method == 'POST':
-        d=request.form.get('date',''); shop=request.form.get('shop','').strip(); product=request.form.get('product','').strip()
+        d=request.form.get('date',''); shop=request.form.get('shop','').strip(); product=request.form.get('product','').strip(); payment_type=request.form.get('payment_type','cash')
         try:
             qty=float(request.form.get('quantity',0)); price=float(request.form.get('price',0)); total=round(qty*price,2)
         except: err='Invalid values.'
+        if payment_type not in ('cash','card'):
+            err='Select a valid payment method.'
         if not err:
-            db.execute('UPDATE transactions SET date=?,shop=?,product=?,quantity=?,price=?,total=? WHERE id=? AND owner_id=?',
-                (d,shop,product,qty,price,total,tid,session['user_id']))
+            db.execute('UPDATE transactions SET date=?,shop=?,product=?,quantity=?,price=?,total=?,payment_type=? WHERE id=? AND owner_id=?',
+                (d,shop,product,qty,price,total,payment_type,tid,session['user_id']))
             db.commit(); return redirect('/history')
+    payment_type = tx['payment_type'] if 'payment_type' in tx.keys() and tx['payment_type'] else 'cash'
     return page(sidebar('history')+f'''
   <div class="tb"><h1>Edit Transaction</h1></div>
   <div class="pb">
@@ -566,6 +582,7 @@ def edit_transaction(tid):
           <div class="fm full"><label>Product *</label><input name="product" type="text" value="{tx['product']}" required></div>
           <div class="fm"><label>Quantity *</label><input name="quantity" type="number" step="0.001" value="{tx['quantity']}" required id="qty" oninput="calc()"></div>
           <div class="fm"><label>Price/Unit (Rs) *</label><input name="price" type="number" step="0.01" value="{tx['price']}" required id="ppu" oninput="calc()"></div>
+          <div class="fm full"><label>Payment Method *</label><div style="display:flex;gap:12px;margin-top:8px"><label style="display:inline-flex;align-items:center;gap:8px;font-size:.9rem;color:#4c4b57"><input type="radio" name="payment_type" value="cash" {'checked' if payment_type=='cash' else ''}> Cash</label><label style="display:inline-flex;align-items:center;gap:8px;font-size:.9rem;color:#4c4b57"><input type="radio" name="payment_type" value="card" {'checked' if payment_type=='card' else ''}> Card</label></div></div>
         </div>
         <div class="tp">Total: Rs<span id="td">{tx['total']:.2f}</span></div>
         <input type="hidden" name="total" id="ti" value="{tx['total']}">
@@ -601,11 +618,13 @@ def history():
     grouped = []
     grouped_map = {}
     for r in txs:
-        key = (r['date'], r['shop'].strip().lower())
+        payment_type = r['payment_type'] if 'payment_type' in r.keys() and r['payment_type'] else 'cash'
+        key = (r['date'], r['shop'].strip().lower(), payment_type)
         if key not in grouped_map:
             grouped_map[key] = {
                 'date': r['date'],
                 'shop': r['shop'],
+                'payment_type': payment_type,
                 'products': [],
                 'items': [],
                 'total': 0.0,
@@ -628,6 +647,7 @@ def history():
     for g in grouped:
         shop_name = g['shop'].strip().title()
         products = ', '.join(p.strip().upper() for p in g['products'] if p.strip())
+        method = g['payment_type'].capitalize() if g.get('payment_type') else 'Cash'
         breakdown = json.dumps(g['items'], ensure_ascii=False).replace("'", "&#39;")
         if is_owner:
             actions = f'<a href="/edit/{g["last_id"]}" class="hx-icon" title="Edit" onclick="event.stopPropagation()">✏️</a>'
@@ -636,7 +656,7 @@ def history():
         rows += f'''
         <tr onclick="showBreakdown(this)" data-date="{g['date']}" data-shop="{shop_name}" data-breakdown='{breakdown}'>
           <td class="hx-date">{g['date']}</td>
-          <td class="hx-shopcell"><strong>{shop_name}</strong><div class="hx-sub">{products}</div></td>
+          <td class="hx-shopcell"><strong>{shop_name} ({method})</strong><div class="hx-sub">{products}</div></td>
           <td class="hx-total">₹{g['total']:,.2f}</td>
           <td class="hx-actions">{actions}</td>
         </tr>'''
@@ -850,11 +870,11 @@ def family():
 @login_required
 @owner_required
 def export_csv():
-    txs = get_db().execute('SELECT date,shop,product,quantity,price,total FROM transactions WHERE owner_id=? ORDER BY date DESC',(session['user_id'],)).fetchall()
+    txs = get_db().execute('SELECT date,shop,product,quantity,price,total,payment_type FROM transactions WHERE owner_id=? ORDER BY date DESC',(session['user_id'],)).fetchall()
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(['Date','Shop','Product','Quantity','Price/Unit','Total'])
-    for r in txs: w.writerow([r['date'],r['shop'],r['product'],r['quantity'],r['price'],r['total']])
+    w.writerow(['Date','Shop','Product','Quantity','Price/Unit','Total','Payment Type'])
+    for r in txs: w.writerow([r['date'],r['shop'],r['product'],r['quantity'],r['price'],r['total'],r['payment_type']])
     fname=f"budget_{session['username']}_{date.today().isoformat()}.csv"
     return Response(out.getvalue(),mimetype='text/csv',headers={'Content-Disposition':f'attachment;filename={fname}'})
 
@@ -862,7 +882,5 @@ def export_csv():
 
 if __name__ == '__main__':
     init_db()
-    open_browser(f"{FLASK_URL}/login")
     print("\n✅ HomeLedger starting...")
-    print("📖 Open: http://localhost:5000/login\n")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run()
