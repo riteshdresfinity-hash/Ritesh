@@ -882,5 +882,4 @@ def export_csv():
 
 if __name__ == '__main__':
     init_db()
-    print("\n✅ HomeLedger starting...")
     app.run()
