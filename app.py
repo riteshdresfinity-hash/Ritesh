@@ -10,7 +10,6 @@ import csv
 import io
 from datetime import datetime, date, timedelta
 from functools import wraps
-from urllib.parse import quote_plus
 from flask import (Flask, render_template_string, request, redirect,
                    url_for, session, g, Response, flash)
 
@@ -601,131 +600,230 @@ def edit_transaction(tid):
 @login_required
 @owner_required
 def delete_transaction(tid):
-    get_db().execute('DELETE FROM transactions WHERE id=? AND owner_id=?',(tid,session['user_id']))
-    get_db().commit()
+    db = get_db()
+    
+    tx = db.execute(
+        'SELECT date, shop, payment_type FROM transactions WHERE id=? AND owner_id=?',
+        (tid, session['user_id'])
+    ).fetchone()
+    
+    if tx:
+        db.execute('''
+            DELETE FROM transactions 
+            WHERE owner_id=? AND date=? AND shop=? AND payment_type=?
+        ''', (session['user_id'], tx['date'], tx['shop'], tx['payment_type']))
+        
+        db.commit()
+
     return redirect('/history')
 
 @app.route('/history')
 @login_required
 def history():
-    db = get_db(); oid = get_owner_id(); q = request.args.get('q', '').strip()
+    db = get_db(); oid = get_owner_id()
+    q = request.args.get('q','').strip()
+    df = request.args.get('from',''); dt = request.args.get('to','')
     params = [oid]; where = 'WHERE owner_id=?'
-    if q:
-        where += ' AND (LOWER(shop) LIKE ? OR LOWER(product) LIKE ?)'
-        params += [f'%{q.lower()}%', f'%{q.lower()}%']
-    txs = db.execute(f'SELECT * FROM transactions {where} ORDER BY date DESC,id DESC', params).fetchall()
-    grouped = []; grouped_map = {}
+    if q: where+=' AND(LOWER(shop) LIKE ? OR LOWER(product) LIKE ?)'; params+=[f'%{q.lower()}%',f'%{q.lower()}%']
+    if df: where+=' AND date>=?'; params.append(df)
+    if dt: where+=' AND date<=?'; params.append(dt)
+    txs = db.execute(f'SELECT * FROM transactions {where} ORDER BY date DESC,id DESC',params).fetchall()
+    grouped = []
+    grouped_map = {}
     for r in txs:
         payment_type = r['payment_type'] if 'payment_type' in r.keys() and r['payment_type'] else 'cash'
         key = (r['date'], r['shop'].strip().lower(), payment_type)
         if key not in grouped_map:
-            grouped_map[key] = {'date': r['date'], 'shop': r['shop'], 'products': [], 'items': [], 'total': 0.0, 'last_id': r['id']}
+            grouped_map[key] = {
+                'date': r['date'],
+                'shop': r['shop'],
+                'payment_type': payment_type,
+                'products': [],
+                'items': [],
+                'total': 0.0,
+                'last_id': r['id']
+            }
             grouped.append(grouped_map[key])
-        grouped_map[key]['items'].append({'product': r['product'], 'quantity': r['quantity'], 'price': r['price'], 'total': r['total']})
+        grouped_map[key]['items'].append({
+            'product': r['product'],
+            'quantity': r['quantity'],
+            'price': r['price'],
+            'total': r['total']
+        })
         if r['product'] not in grouped_map[key]['products']:
             grouped_map[key]['products'].append(r['product'])
         grouped_map[key]['total'] += float(r['total'])
         grouped_map[key]['last_id'] = max(grouped_map[key]['last_id'], r['id'])
-    date_totals = db.execute("""SELECT date, COALESCE(SUM(total),0) tot,
-        COALESCE(SUM(CASE WHEN payment_type='cash' THEN total ELSE 0 END),0) cash,
-        COALESCE(SUM(CASE WHEN payment_type='card' THEN total ELSE 0 END),0) card
-        FROM transactions WHERE owner_id=? GROUP BY date ORDER BY date DESC""", (oid,)).fetchall()
-    daily_stats = {row['date']: {'total': float(row['tot']), 'cash': float(row['cash']), 'card': float(row['card'])} for row in date_totals}
-    selected_date = txs[0]['date'] if txs else (date_totals[0]['date'] if date_totals else date.today().isoformat())
-    selected_stats = daily_stats.get(selected_date, {'total': 0.0, 'cash': 0.0, 'card': 0.0})
-    quick_dates = ''.join(f'<button type="button" class="quick-select-item{" active" if row["date"] == selected_date else ""}" data-date="{row["date"]}"><span>{row["date"]}</span><strong>₹{float(row["tot"]):,.2f}</strong></button>' for row in date_totals[:10]) or '<div class="quick-empty">No dates yet.</div>'
-    is_owner = session.get('role') == 'owner'; rows = ''
+    tot = sum(g['total'] for g in grouped)
+    is_owner = session.get('role')=='owner'
+    rows = ''
     for g in grouped:
         shop_name = g['shop'].strip().title()
-        products = ', '.join(p.strip() for p in g['products'] if p.strip()) or 'No items'
-        breakdown = json.dumps(g['items'], ensure_ascii=False).replace("'", '&#39;')
-        actions = f'<a href="/edit/{g["last_id"]}" class="hx-edit" onclick="event.stopPropagation()">Edit</a>' if is_owner else '<span class="hx-view">View only</span>'
-        rows += f'<tr onclick="showBreakdown(this)" data-date="{g["date"]}" data-shop="{shop_name}" data-breakdown=\'{breakdown}\'><td>{g["date"]}</td><td><strong>{shop_name}</strong><div class="hx-sub">{products}</div></td><td class="hx-money">₹{g["total"]:,.2f}</td><td>{actions}</td></tr>'
-    rows = rows or '<tr><td colspan="4" class="hx-empty">No transactions found</td></tr>'
-    total_filtered = sum(g['total'] for g in grouped)
-    return page(sidebar('history') + f'''
-  <div class="tb"><h1>History</h1><a href="/export" class="btn bg">Export CSV</a></div>
+        products = ', '.join(p.strip().upper() for p in g['products'] if p.strip())
+        method = g['payment_type'].capitalize() if g.get('payment_type') else 'Cash'
+        breakdown = json.dumps(g['items'], ensure_ascii=False).replace("'", "&#39;")
+        if is_owner:
+            actions = f'<a href="/edit/{g["last_id"]}" class="hx-icon" title="Edit" onclick="event.stopPropagation()">✏️</a>'
+        else:
+            actions = '<span class="hx-muted">View only</span>'
+        rows += f'''
+        <tr onclick="showBreakdown(this)" data-date="{g['date']}" data-shop="{shop_name}" data-breakdown='{breakdown}'>
+          <td class="hx-date">{g['date']}</td>
+          <td class="hx-shopcell"><strong>{shop_name} ({method})</strong><div class="hx-sub">{products}</div></td>
+          <td class="hx-total">₹{g['total']:,.2f}</td>
+          <td class="hx-actions">{actions}</td>
+        </tr>'''
+    if not rows:
+        rows = '<tr><td colspan="4" class="es" style="text-align:center;padding:48px;">No transactions found.</td></tr>'
+    return page(sidebar('history')+'''
   <div class="pb">
     <style>
-      .history-layout{{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:28px;align-items:start}}
-      .history-panel,.summary-panel{{background:#fff;border:1px solid #dde5f2;border-radius:24px;box-shadow:0 2px 12px rgba(31,41,55,.08)}}
-      .history-panel{{overflow:hidden}} .summary-panel{{padding:28px;position:sticky;top:24px}}
-      .history-head2{{padding:30px 28px 22px}} .history-title2{{font:700 1.12rem 'DM Sans',sans-serif;color:#1f3151;margin-bottom:24px}}
-      .history-topbar{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center}}
-      .history-search input{{width:100%;height:56px;border:1px solid #d6deec;border-radius:18px;background:#f7faff;padding:0 18px;font:inherit;color:#334155;outline:none}}
-      .history-search input:focus{{border-color:#4f46e5;box-shadow:0 0 0 4px rgba(79,70,229,.12);background:#fff}}
-      .history-total small{{display:block;font-size:.85rem;color:#6680aa}} .history-total strong{{display:block;font-size:1.15rem;color:#4f46e5}}
-      .history-table table{{width:100%;border-collapse:collapse}} .history-table th,.history-table td{{padding:18px 28px;text-align:left;border-bottom:1px solid #ebf0f8}}
-      .history-table th{{font-size:.74rem;color:#5d769d;background:#fff;font-weight:700}} .history-table tbody tr{{cursor:pointer}} .history-table tbody tr:hover{{background:#f8fbff}}
-      .history-table strong{{display:block;color:#1f3151}} .hx-sub{{margin-top:5px;font-size:.86rem;color:#8ca0bd}} .hx-money{{font-weight:800;color:#223b67;white-space:nowrap}}
-      .hx-edit{{display:inline-flex;align-items:center;justify-content:center;min-width:58px;height:34px;padding:0 12px;border-radius:10px;background:#eef2ff;color:#4f46e5;font-size:.82rem;font-weight:700}} .hx-view{{font-size:.84rem;color:#94a3b8}} .hx-empty{{padding:92px 28px !important;text-align:center;color:#91a4c5}}
-      .summary-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:24px}} .summary-head h3{{font:800 1.08rem 'DM Sans',sans-serif;color:#1f3151}} .summary-date{{margin-top:4px;color:#7087aa}}
-      .summary-icon{{width:56px;height:56px;border-radius:16px;background:#eef2ff;display:flex;align-items:center;justify-content:center;color:#4f46e5;font-size:1.4rem;font-weight:700}}
-      .sum-box{{background:#f6f8fc;border:1px solid #e8edf5;border-radius:22px;padding:18px 20px;margin-bottom:18px}} .sum-box small{{display:block;margin-bottom:8px;font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#8ea1bd}} .sum-box strong{{font-size:2rem;color:#17233c}}
-      .pay-card{{display:flex;justify-content:space-between;align-items:center;padding:20px;border-radius:20px;border:1px solid #f8df97;background:#fff9ea;margin-bottom:16px}} .pay-card.card{{border-color:#cfe0ff;background:#edf4ff}}
-      .pay-name{{display:flex;align-items:center;gap:12px;font-weight:800;color:#b45309}} .pay-card.card .pay-name,.pay-card.card .pay-value{{color:#1d4ed8}} .pay-value{{font-size:1.08rem;font-weight:900;color:#c25b00}} .pay-dot{{width:10px;height:10px;border-radius:50%;background:#ff980f}} .pay-card.card .pay-dot{{background:#3b82f6}}
-      .quick-wrap{{border-top:1px solid #edf2fb;padding-top:24px}} .quick-wrap h4{{font-size:.74rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#8ea1bd;margin-bottom:14px}}
-      .quick-list{{display:flex;flex-direction:column;gap:10px;max-height:320px;overflow:auto}} .quick-select-item{{display:flex;justify-content:space-between;gap:12px;padding:12px 14px;border:none;border-radius:14px;background:#f7faff;color:#4a6388;font:inherit;cursor:pointer}} .quick-select-item.active{{background:#4f46e5;color:#fff}} .quick-empty{{color:#91a4c5}}
-      .hx-modal{{position:fixed;inset:0;background:rgba(15,23,42,.58);display:none;align-items:center;justify-content:center;z-index:9999;padding:24px}} .hx-modal.active{{display:flex}}
-      .hx-modal-card{{background:#fff;border-radius:28px;max-width:560px;width:100%;overflow:hidden}} .hx-modal-top{{padding:24px;background:#f8fbff;position:relative}} .hx-modal-top h3{{font-size:1.45rem;color:#172554}} .hx-modal-date{{margin-top:6px;color:#7b8eac}}
-      .hx-close{{position:absolute;top:18px;right:18px;width:36px;height:36px;border:none;border-radius:50%;background:#e2e8f0;color:#475569;cursor:pointer}} .hx-modal-body{{padding:20px 24px 0;display:grid;gap:14px;max-height:calc(100vh - 240px);overflow:auto}}
-      .hx-item{{display:flex;justify-content:space-between;gap:18px;padding:16px 18px;background:#f8faff;border:1px solid #e6ebf5;border-radius:18px}} .hx-item b{{display:block;color:#172554}} .hx-item span{{font-size:.9rem;color:#6b7280}} .hx-item strong{{white-space:nowrap;color:#4f46e5}}
-      .hx-foot{{margin-top:20px;padding:20px 24px 24px;background:#4f46e5;color:#fff;display:flex;justify-content:space-between}} .hx-foot small{{letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.78)}}
-      @media(max-width:1080px){{.history-layout{{grid-template-columns:1fr}} .summary-panel{{position:static}}}} @media(max-width:760px){{.history-topbar{{grid-template-columns:1fr}} .history-table{{overflow:auto}} .history-table th,.history-table td{{padding:18px}} .history-head2,.summary-panel{{padding:22px}}}}
+      .history-wrap{{max-width:1260px}}
+      .history-card{{background:#f7efe2;border:1px solid #e8dcc8;border-radius:24px;box-shadow:0 10px 32px rgba(140,113,78,.12);overflow:hidden}}
+      .history-top{{padding:30px 30px 18px}}
+      .history-title{{font-family:'DM Sans',sans-serif;font-size:1.25rem;font-weight:700;color:#402a18;margin-bottom:28px}}
+      .history-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}}
+      .history-search{{position:relative;flex:1;max-width:650px}}
+      .history-search::before{{content:'⌕';position:absolute;left:22px;top:50%;transform:translateY(-50%);font-size:1.5rem;color:#b58d5c}}
+      .history-search input{{width:100%;height:64px;padding:0 20px 0 66px;border:1px solid #e5d4b8;border-radius:18px;background:#fff6ed;color:#5d4632;font-size:1rem;font-family:inherit;outline:none}}
+      .history-search input:focus{{border-color:#c9882a;box-shadow:0 0 0 4px rgba(201,136,42,.15);background:#fff}}
+      .history-summary{{min-width:220px;text-align:right;padding-top:4px}}
+      .history-summary span{{display:block;font-size:.95rem;color:#8a7b62;margin-bottom:4px}}
+      .history-summary strong{{display:block;font-size:2.05rem;line-height:1;color:#8f5c16;font-family:'DM Sans',sans-serif;font-weight:700}}
+      .history-table{{position:relative}}
+      .history-table::before,.history-table::after{{position:absolute;top:36px;color:#ebdfcf;font-size:2rem;line-height:1}}
+      .history-table::before{{content:'‹';left:12px}}
+      .history-table::after{{content:'›';right:12px}}
+      .history-table table{{width:100%;border-collapse:collapse}}
+      .history-table th, .history-table td{{padding:28px 30px;text-align:left}}
+      .history-table th{{font-size:.9rem;font-weight:700;color:#7e6546;border-top:1px solid #f0e5d5;border-bottom:1px solid #f0e5d5;background:#fff8ef}}
+      .history-table tbody tr{{border-bottom:1px solid #f0e5d5;cursor:pointer}}
+      .history-table tbody tr:hover{{background:#fff2dd}}
+      .history-table tbody tr:last-child{{border-bottom:none}}
+      .history-table td{{font-size:.98rem;color:#4b3420}}
+      .hx-date{{width:24%;white-space:nowrap;color:#6d5439}}
+      .hx-shopcell strong{{display:block;font-size:1.18rem;color:#3d2916;font-weight:700;letter-spacing:-.02em;margin-bottom:2px}}
+      .hx-sub{{font-size:.8rem;color:#937b5f;font-style:italic;letter-spacing:.01em}}
+      .hx-total{{font-size:1.05rem;font-weight:700;color:#6d4a18;white-space:nowrap}}
+      .hx-actions{{width:120px;white-space:nowrap}}
+      .hx-icon{{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;border-radius:12px;border:1px solid #e0c7a1;background:#fff3e6;color:#c9882a;text-decoration:none;font-size:1rem}}
+      .hx-icon:hover{{background:#fff1dc}}
+      .hx-muted{{color:#9b8b79;font-size:.85rem}}
+      .hx-modal{position:fixed;inset:0;background:rgba(15,23,42,.58);display:none;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(4px);padding:24px;}
+      .hx-modal.active{display:flex !important;}
+      .hx-modal-card{background:#ffffff;border-radius:32px;max-width:560px;width:100%;box-shadow:0 40px 80px rgba(15,23,42,.18);overflow:hidden;min-width:320px;}
+      .hx-modal-header{position:relative;padding:28px 28px 16px;display:flex;flex-direction:column;gap:6px;background:#f8fafc;}
+      .hx-modal-title{font-size:1.7rem;font-weight:800;color:#111827;margin:0;line-height:1.05;}
+      .hx-modal-sub{font-size:.95rem;color:#6b7280;}
+      .hx-modal-close{position:absolute;top:20px;right:20px;width:38px;height:38px;border:none;border-radius:50%;background:#e2e8f0;color:#475569;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+      .hx-modal-close:hover{background:#cbd5e1;}
+      .hx-modal-body{padding:22px 24px 0;display:grid;gap:16px;max-height:calc(100vh - 240px);overflow-y:auto;}
+      .hx-item-card{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 20px;background:#f8f9ff;border:1px solid #e5e7f0;border-radius:22px;}
+      .hx-item-left{display:flex;flex-direction:column;gap:6px;min-width:0;}
+      .hx-item-name{font-size:1rem;font-weight:800;color:#111827;}
+      .hx-item-meta{font-size:.9rem;color:#6b7280;}
+      .hx-item-total{font-size:1.05rem;font-weight:800;color:#4338ca;white-space:nowrap;}
+      .hx-modal-footer{margin-top:22px;padding:22px 24px 24px;background:#3730a3;color:#fff;display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid rgba(255,255,255,.12);}
+      .hx-footer-label{font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.75);font-weight:700;}
+      .hx-footer-total{font-size:1.7rem;font-weight:800;}
+      @media(max-width:520px){.hx-modal-card{margin:16px}.hx-modal-header{padding:22px 20px 14px}.hx-modal-body{padding:18px 20px 0}.hx-modal-footer{padding:18px 20px 20px}.hx-item-card{flex-direction:column;align-items:flex-start;}}
+      @media(max-width:500px){.hx-item-card{flex-direction:column;align-items:flex-start;gap:12px}}
+      @media(max-width:900px){.history-head{flex-direction:column}.history-summary{text-align:left}}
+      @media(max-width:700px){.history-top{padding:22px 20px 14px}.history-table{overflow-x:auto}.history-table th,.history-table td{padding:20px}}
     </style>
-    <div class="history-layout">
-      <div class="history-panel">
-        <div class="history-head2">
-          <div class="history-title2">Transaction History</div>
-          <div class="history-topbar">
-            <form method="get" class="history-search"><input name="q" type="text" placeholder="Search shop or product..." value="{q}"></form>
-            <div class="history-total"><small>Total Filtered</small><strong>₹{total_filtered:,.2f}</strong></div>
+    <div class="history-wrap">
+      <div class="history-card">
+        <div class="history-top">
+          <div class="history-title">Transaction History</div>
+          <div class="history-head">
+            <form method="get" class="history-search">
+              <input name="q" type="text" placeholder="Search shop or product..." value="{q}">
+            </form>
+            <div class="history-summary">
+              <span>Total Filtered</span>
+              <strong>₹{tot:,.2f}</strong>
+            </div>
           </div>
         </div>
-        <div class="history-table"><table><thead><tr><th>Date</th><th>Shop & Products</th><th>Total</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table></div>
-      </div>
-      <div class="summary-panel">
-        <div class="summary-head"><div><h3>Daily Summary</h3><div class="summary-date" id="selectedDate">{selected_date}</div></div><div class="summary-icon">↗</div></div>
-        <div class="sum-box"><small>Total Spent</small><strong id="selectedTotal">₹{selected_stats["total"]:,.2f}</strong></div>
-        <div class="pay-card"><div class="pay-name"><span class="pay-dot"></span>Cash</div><div class="pay-value" id="selectedCash">₹{selected_stats["cash"]:,.2f}</div></div>
-        <div class="pay-card card"><div class="pay-name"><span class="pay-dot"></span>Card</div><div class="pay-value" id="selectedCard">₹{selected_stats["card"]:,.2f}</div></div>
-        <div class="quick-wrap"><h4>Quick Select Date</h4><div class="quick-list">{quick_dates}</div></div>
+        <div class="history-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Shop & Products</th>
+                <th>Total</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
-  <div class="hx-modal" id="hxModal"><div class="hx-modal-card"><div class="hx-modal-top"><h3 id="hxModalTitle">Transaction Breakdown</h3><div class="hx-modal-date" id="hxModalDate"></div><button class="hx-close" type="button" onclick="closeBreakdown()">x</button></div><div class="hx-modal-body" id="hxModalBody"></div><div class="hx-foot"><small>Net Total</small><strong id="hxFooterTotal">₹0.00</strong></div></div></div>
+  <div class="hx-modal" id="hxModal">
+    <div class="hx-modal-card">
+      <div class="hx-modal-header">
+        <div>
+          <div class="hx-modal-title" id="hxModalTitle">Transaction breakdown</div>
+          <div class="hx-modal-sub" id="hxModalSub" style="font-size:.9rem;color:#8a7f67;margin-top:4px"></div>
+        </div>
+        <button class="hx-modal-close" onclick="closeBreakdown()">×</button>
+      </div>
+      <div class="hx-modal-body" id="hxModalBody"></div>
+      <div class="hx-modal-footer">
+        <span class="hx-footer-label">Net total</span>
+        <span class="hx-footer-total" id="hxFooterTotal">₹0.00</span>
+      </div>
+    </div>
+  </div>
   <script>
-    function showBreakdown(row) {{
-      var items=[]; try {{ items=JSON.parse(row.dataset.breakdown||'[]'); }} catch(e) {{}}
-      document.getElementById('hxModalTitle').textContent=row.dataset.shop||'Transaction';
-      document.getElementById('hxModalDate').textContent=row.dataset.date||'';
-      var body=document.getElementById('hxModalBody'), total=0; body.innerHTML='';
-      if(!items.length) body.innerHTML='<div style="padding:12px;color:#6b7280;">No details available.</div>';
-      items.forEach(function(item) {{
-        total += parseFloat(item.total)||0;
-        body.innerHTML += '<div class="hx-item"><div><b>'+item.product+'</b><span>Rs'+parseFloat(item.price).toFixed(2)+' x '+item.quantity+'</span></div><strong>Rs'+parseFloat(item.total).toFixed(2)+'</strong></div>';
-      }});
-      document.getElementById('hxFooterTotal').textContent='₹'+total.toFixed(2);
-      document.getElementById('hxModal').classList.add('active'); document.body.style.overflow='hidden';
-    }}
-    function closeBreakdown() {{ document.getElementById('hxModal').classList.remove('active'); document.body.style.overflow=''; }}
-    document.getElementById('hxModal').addEventListener('click', function(e) {{ if(e.target===this) closeBreakdown(); }});
-    document.addEventListener('keydown', function(e) {{ if(e.key==='Escape') closeBreakdown(); }});
-    (function() {{
-      var stats = {json.dumps(daily_stats)}; var current = '{selected_date}';
-      function setDate(d) {{
-        if(!stats[d]) return;
-        document.getElementById('selectedDate').textContent = d;
-        document.getElementById('selectedTotal').textContent = '₹' + stats[d].total.toFixed(2);
-        document.getElementById('selectedCash').textContent = '₹' + stats[d].cash.toFixed(2);
-        document.getElementById('selectedCard').textContent = '₹' + stats[d].card.toFixed(2);
-        document.querySelectorAll('.quick-select-item').forEach(function(el) {{ el.classList.toggle('active', el.dataset.date === d); }});
-      }}
-      document.querySelectorAll('.quick-select-item').forEach(function(btn) {{ btn.addEventListener('click', function() {{ setDate(btn.dataset.date); }}); }});
-      if(current) setDate(current);
-    }})();
+    function showBreakdown(row) {
+      var breakdown;
+      try { breakdown = JSON.parse(row.dataset.breakdown || '[]'); }
+      catch (e) { breakdown = []; }
+      var title = row.dataset.shop || 'Transaction';
+      var date = row.dataset.date || '';
+      var body = document.getElementById('hxModalBody');
+      var subtitle = document.getElementById('hxModalSub');
+      subtitle.textContent = date;
+      body.innerHTML = '';
+      var total = 0;
+      if (!breakdown.length) {
+        body.innerHTML = '<div style="padding:16px;color:#6b7280;">No details available.</div>';
+      } else {
+        breakdown.forEach(function(item) {
+          total += parseFloat(item.total) || 0;
+          var rowEl = document.createElement('div');
+          rowEl.className = 'hx-item-card';
+          rowEl.innerHTML = '<div class="hx-item-left"><div class="hx-item-name">' + item.product + '</div><div class="hx-item-meta">Rs' + parseFloat(item.price).toFixed(2) + ' × ' + item.quantity + '</div></div><div class="hx-item-total">Rs' + parseFloat(item.total).toFixed(2) + '</div>';
+          body.appendChild(rowEl);
+        });
+      }
+      document.getElementById('hxFooterTotal').textContent = '₹' + total.toFixed(2);
+      document.getElementById('hxModalTitle').textContent = title;
+      var modal = document.getElementById('hxModal');
+      modal.classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+    function closeBreakdown() {
+      var modal = document.getElementById('hxModal');
+      modal.classList.remove('active');
+      document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeBreakdown();
+    });
+    document.getElementById('hxModal').addEventListener('click', function(e) {
+      if (e.target === this) closeBreakdown();
+    });
   </script>
-  </div></div>''')
+</div></div>'''
+    .replace('{q}', q)
+    .replace('{tot}', f"{tot:,.2f}")
+    .replace('{rows}', rows))
 
 @app.route('/family', methods=['GET','POST'])
 @login_required
@@ -797,5 +895,4 @@ def export_csv():
 
 if __name__ == '__main__':
     init_db()
-    print("\n✅ HomeLedger starting...")
     app.run()
