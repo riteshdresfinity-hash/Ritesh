@@ -1,7 +1,2 @@
-﻿streamlit>=1.40.0
-fastapi>=0.115.0
-uvicorn>=0.32.0
-python-multipart>=0.0.12
-pillow>=10.4.0
-numpy>=2.1.0
-groq
+Flask
+gunicorn
